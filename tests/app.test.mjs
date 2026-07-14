@@ -25,3 +25,13 @@ test("Bilibili WBI and websocket protocol support are present", () => {
   assert.match(source, /DANMU_MSG/);
   assert.match(source, /SUPER_CHAT_MESSAGE/);
 });
+
+test("overlay keeps complete usernames visible", () => {
+  const styles = readFileSync("src/styles.css", "utf8");
+  const nameRule = styles.match(/\.danmaku__name\s*\{([^}]*)\}/)?.[1] || "";
+
+  assert.match(styles, /\.danmaku\s*\{[^}]*flex:\s*0 0 auto;/s);
+  assert.match(nameRule, /white-space:\s*normal/);
+  assert.match(nameRule, /overflow-wrap:\s*anywhere/);
+  assert.doesNotMatch(nameRule, /ellipsis|nowrap/);
+});

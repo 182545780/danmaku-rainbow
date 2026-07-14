@@ -291,7 +291,7 @@ function ControlPanel() {
 
           <section className="panel compact-panel">
             <div className="panel-title"><span>04</span><div><h2>显示内容</h2><p>控制 OBS 画面元素</p></div></div>
-            <Toggle checked={settings.showNames} label="观众昵称" note="显示 @用户名" onChange={(showNames) => update({ showNames })} />
+            <Toggle checked={settings.showNames} label="观众昵称" note="完整显示用户名" onChange={(showNames) => update({ showNames })} />
             <Toggle checked={settings.showShadow} label="文字阴影" note="复杂画面更清晰" onChange={(showShadow) => update({ showShadow })} />
             <Toggle checked={settings.showGifts} label="礼物与醒目留言" note="包含 SC 与礼物提示" onChange={(showGifts) => update({ showGifts })} />
           </section>
