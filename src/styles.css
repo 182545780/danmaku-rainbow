@@ -161,6 +161,7 @@ textarea:focus { border-color: #7458ff; }
   --duration: 14s; --name-color: #ff5c8a; --font-size: 28px; --opacity: .94;
   position: relative;
   display: block;
+  flex: 0 0 auto;
   width: 100%;
   padding: .08em .06em;
   color: #f7f8fb;
@@ -177,7 +178,7 @@ textarea:focus { border-color: #7458ff; }
 .overlay--left .danmaku { transform-origin: 10% 100%; }
 .danmaku.has-shadow { text-shadow: 0 2px 3px #000, 0 0 2px #000, 1px 1px 0 rgba(0,0,0,.82); }
 .danmaku__body { position: relative; z-index: 1; display: block; min-width: 0; overflow-wrap: anywhere; white-space: normal; word-break: break-word; }
-.danmaku__name { display: inline; color: var(--name-color); background: none; -webkit-text-fill-color: var(--name-color); font-weight: 920; text-shadow: 0 1px 2px rgba(0,0,0,.95); filter: none; }
+.danmaku__name { display: inline; max-width: none; overflow: visible; color: var(--name-color); background: none; -webkit-text-fill-color: var(--name-color); font-weight: 920; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; word-break: break-word; text-shadow: 0 1px 2px rgba(0,0,0,.95); filter: none; }
 .danmaku__content { display: inline; color: #f7f8fb; -webkit-text-fill-color: #f7f8fb; }
 .danmaku__badge { display: inline-block; margin-right: .32em; padding: .16em .36em; border: 1px solid rgba(255,255,255,.5); border-radius: .24em; color: #fff; background: rgba(123,73,238,.78); font: 900 .48em/1 ui-monospace, monospace; letter-spacing: .02em; text-shadow: 0 1px 2px #000; vertical-align: .17em; }
 @keyframes chat-in { from { opacity: 0; transform: translateY(22px) scale(.94); } to { opacity: var(--opacity); transform: translateY(0) scale(1); } }

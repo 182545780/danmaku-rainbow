@@ -2,6 +2,16 @@
 
 一款面向 macOS 和 OBS 的 B 站直播弹幕叠加工具。输入直播间号后，应用会连接 B 站直播消息流，并在透明浏览器源中显示 Twitch 风格的侧栏弹幕。
 
+## 界面预览
+
+### 控制面板
+
+![彩虹弹幕机控制面板](docs/images/control-panel.png)
+
+### OBS 效果
+
+![OBS 中的弹幕侧栏效果](docs/images/obs-overlay.png)
+
 ## 使用方法
 
 1. 打开 `彩虹弹幕机.app`。
