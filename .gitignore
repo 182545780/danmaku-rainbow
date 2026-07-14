@@ -30,5 +30,7 @@ yarn-error.log*
 next-env.d.ts
 /dist/
 /dist-web/
+/.vinext/
+/.wrangler/
 /outputs/
 /work/
