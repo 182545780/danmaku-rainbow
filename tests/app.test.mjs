@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
+import { isMaskedUserName, visibleUserName } from "../electron/bilibili-user.mjs";
 
 test("web build contains the control panel bundle", () => {
   assert.equal(existsSync("dist-web/index.html"), true);
@@ -34,4 +35,16 @@ test("overlay keeps complete usernames visible", () => {
   assert.match(nameRule, /white-space:\s*normal/);
   assert.match(nameRule, /overflow-wrap:\s*anywhere/);
   assert.doesNotMatch(nameRule, /ellipsis|nowrap/);
+});
+
+test("masked Bilibili usernames are resolved or replaced with a full UID", () => {
+  const source = readFileSync("electron/main.mjs", "utf8");
+
+  assert.equal(isMaskedUserName("云***"), true);
+  assert.equal(isMaskedUserName("完整用户名"), false);
+  assert.equal(visibleUserName("云***", 123456), "用户123456");
+  assert.equal(visibleUserName("完整用户名", 123456), "完整用户名");
+  assert.match(source, /x\/frontend\/finger\/spi/);
+  assert.match(source, /x\/web-interface\/card\?mid=/);
+  assert.match(source, /userNameCache/);
 });
