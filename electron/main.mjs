@@ -6,6 +6,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { deserialize, serialize, WS_OP } from "tiny-bilibili-ws";
+import { isMaskedUserName, visibleUserName } from "./bilibili-user.mjs";
 
 const PORT = 19190;
 const HOST = "127.0.0.1";
@@ -46,7 +47,10 @@ let reconnectTimer = null;
 let connectionGeneration = 0;
 let messageSequence = 0;
 let lastStatus = { state: "idle", message: "等待输入房间号" };
+let biliDeviceCookiePromise = null;
 const eventClients = new Set();
+const userNameCache = new Map();
+const MAX_USER_NAME_CACHE = 2048;
 
 function json(response, data, status = 200) {
   response.writeHead(status, {
@@ -128,13 +132,14 @@ function signWbi(params, imgKey, subKey) {
 }
 
 async function fetchJson(url, options = {}) {
+  const { timeoutMs = 10000, ...requestOptions } = options;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
-      ...options,
+      ...requestOptions,
       signal: controller.signal,
-      headers: { "User-Agent": USER_AGENT, ...options.headers },
+      headers: { "User-Agent": USER_AGENT, ...requestOptions.headers },
     });
     if (!response.ok) throw new Error(`B 站接口返回 HTTP ${response.status}`);
     return await response.json();
@@ -143,16 +148,67 @@ async function fetchJson(url, options = {}) {
   }
 }
 
+async function getBiliDeviceCookie() {
+  if (!biliDeviceCookiePromise) {
+    biliDeviceCookiePromise = fetchJson("https://api.bilibili.com/x/frontend/finger/spi", {
+      timeoutMs: 5000,
+      headers: { Referer: "https://www.bilibili.com/" },
+    }).then((result) => {
+      const buvid3 = result.data?.b_3;
+      const buvid4 = result.data?.b_4;
+      if (result.code !== 0 || !buvid3 || !buvid4) throw new Error(result.message || "无法获取 B 站设备标识");
+      return `buvid3=${buvid3}; buvid4=${buvid4}`;
+    }).catch((error) => {
+      biliDeviceCookiePromise = null;
+      throw error;
+    });
+  }
+  return biliDeviceCookiePromise;
+}
+
+async function resolveUserName(uid, receivedName) {
+  const numericUid = Number(uid) || 0;
+  const fallback = visibleUserName(receivedName, numericUid);
+  if (!numericUid || !isMaskedUserName(receivedName)) return fallback;
+
+  const cacheKey = String(numericUid);
+  if (userNameCache.has(cacheKey)) return userNameCache.get(cacheKey);
+
+  const lookup = (async () => {
+    try {
+      const cookie = await getBiliDeviceCookie();
+      const result = await fetchJson(`https://api.bilibili.com/x/web-interface/card?mid=${numericUid}`, {
+        timeoutMs: 4000,
+        headers: {
+          Cookie: cookie,
+          Referer: `https://space.bilibili.com/${numericUid}/`,
+        },
+      });
+      if (result.code !== 0) throw new Error(result.message || `用户资料接口返回 ${result.code}`);
+      return visibleUserName(result.data?.card?.name, numericUid);
+    } catch (error) {
+      console.warn(`无法还原用户 ${numericUid} 的完整昵称`, error.message);
+      return fallback;
+    }
+  })();
+
+  userNameCache.set(cacheKey, lookup);
+  if (userNameCache.size > MAX_USER_NAME_CACHE) userNameCache.delete(userNameCache.keys().next().value);
+  return lookup;
+}
+
 async function getConnectionInfo(roomInput) {
+  const cookie = await getBiliDeviceCookie().catch(() => "");
+  const cookieHeader = cookie ? { Cookie: cookie } : {};
   const room = await fetchJson(`https://api.live.bilibili.com/room/v1/Room/room_init?id=${roomInput}`, {
-    headers: { Referer: `https://live.bilibili.com/${roomInput}` },
+    headers: { Referer: `https://live.bilibili.com/${roomInput}`, ...cookieHeader },
   });
   if (room.code !== 0 || !room.data?.room_id) throw new Error(room.message || "直播间不存在");
   if (room.data.is_hidden || room.data.is_locked) throw new Error("该直播间当前不可访问");
   const roomId = Number(room.data.room_id);
 
   const nav = await fetchJson("https://api.bilibili.com/x/web-interface/nav", {
-    headers: { Referer: "https://www.bilibili.com/" },
+    headers: { Referer: "https://www.bilibili.com/", ...cookieHeader },
   });
   const imgUrl = nav.data?.wbi_img?.img_url;
   const subUrl = nav.data?.wbi_img?.sub_url;
@@ -162,12 +218,13 @@ async function getConnectionInfo(roomInput) {
     headers: {
       Referer: `https://live.bilibili.com/blanc/${roomId}?liteVersion=true`,
       Origin: "https://live.bilibili.com",
+      ...cookieHeader,
     },
   });
   if (danmu.code !== 0 || !danmu.data?.token || !danmu.data?.host_list?.length) {
     throw new Error(danmu.message === "-352" ? "B 站风控拦截，请稍后重试" : danmu.message || "无法获取弹幕线路");
   }
-  return { roomId, token: danmu.data.token, hosts: danmu.data.host_list };
+  return { roomId, token: danmu.data.token, hosts: danmu.data.host_list, cookie };
 }
 
 function colorFromNumber(value) {
@@ -175,10 +232,12 @@ function colorFromNumber(value) {
   return Number.isFinite(number) ? `#${number.toString(16).padStart(6, "0").slice(-6)}` : "#ffffff";
 }
 
-function emitDanmu(data) {
+async function emitDanmu(data) {
   const info = data.info;
   if (!Array.isArray(info)) return;
-  const user = Array.isArray(info[2]) ? String(info[2][1] || "匿名观众") : "匿名观众";
+  const uid = Number(info[2]?.[0] || 0);
+  const receivedName = Array.isArray(info[2]) ? String(info[2][1] || "") : "";
+  const user = await resolveUserName(uid, receivedName);
   const content = String(info[1] || "").trim();
   if (!content) return;
   broadcast("danmu", {
@@ -191,25 +250,29 @@ function emitDanmu(data) {
   });
 }
 
-function emitSuperChat(data) {
+async function emitSuperChat(data) {
   const body = data.data || {};
+  const uid = Number(body.uid || body.user_info?.uid || 0);
+  const user = await resolveUserName(uid, body.user_info?.uname);
   broadcast("superchat", {
     id: `${Date.now()}-${messageSequence += 1}`,
     kind: "superchat",
-    user: String(body.user_info?.uname || "醒目留言"),
+    user,
     content: String(body.message || "发送了一条醒目留言"),
     sourceColor: body.background_color || "#ffb21c",
     price: Number(body.price || 0),
   });
 }
 
-function emitGift(data) {
+async function emitGift(data) {
   const body = data.data || {};
   const amount = Number(body.num || 1);
+  const uid = Number(body.uid || 0);
+  const user = await resolveUserName(uid, body.uname);
   broadcast("gift", {
     id: `${Date.now()}-${messageSequence += 1}`,
     kind: "gift",
-    user: String(body.uname || "匿名观众"),
+    user,
     content: `送出 ${body.giftName || "礼物"}${amount > 1 ? ` × ${amount}` : ""}`,
     sourceColor: "#ff5ca8",
   });
@@ -241,9 +304,11 @@ async function handleSocketData(raw, generation) {
     }
     if (packet.meta.op !== WS_OP.MESSAGE || !packet.data) continue;
     const command = String(packet.data.cmd || packet.data.msg?.cmd || "");
-    if (command.startsWith("DANMU_MSG")) emitDanmu(packet.data);
-    else if (command === "SUPER_CHAT_MESSAGE" || command === "SUPER_CHAT_MESSAGE_JPN") emitSuperChat(packet.data);
-    else if (command === "SEND_GIFT") emitGift(packet.data);
+    let emitter = null;
+    if (command.startsWith("DANMU_MSG")) emitter = emitDanmu(packet.data);
+    else if (command === "SUPER_CHAT_MESSAGE" || command === "SUPER_CHAT_MESSAGE_JPN") emitter = emitSuperChat(packet.data);
+    else if (command === "SEND_GIFT") emitter = emitGift(packet.data);
+    emitter?.catch((error) => console.error("处理用户昵称失败", error));
   }
 }
 
@@ -277,7 +342,7 @@ async function connectRoom(isReconnect = false) {
     updateStatus({ state: "connecting", message: "正在连接弹幕服务器", roomId: info.roomId });
     liveSocket = new WebSocket(url, {
       origin: "https://live.bilibili.com",
-      headers: { "User-Agent": USER_AGENT },
+      headers: { "User-Agent": USER_AGENT, ...(info.cookie ? { Cookie: info.cookie } : {}) },
       handshakeTimeout: 10000,
     });
     liveSocket.binaryType = "arraybuffer";
