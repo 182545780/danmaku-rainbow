@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from "electron";
+import { app, BrowserWindow, Menu, session, shell } from "electron";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -6,7 +6,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { deserialize, serialize, WS_OP } from "tiny-bilibili-ws";
-import { isMaskedUserName, visibleUserName } from "./bilibili-user.mjs";
+import { displayUserName } from "./bilibili-user.mjs";
 
 const PORT = 19190;
 const HOST = "127.0.0.1";
@@ -38,6 +38,8 @@ const CONTENT_TYPES = {
 };
 
 let mainWindow = null;
+let loginWindow = null;
+let loginCheckTimer = null;
 let server = null;
 let settings = { ...DEFAULT_SETTINGS };
 let settingsPath = "";
@@ -47,10 +49,8 @@ let reconnectTimer = null;
 let connectionGeneration = 0;
 let messageSequence = 0;
 let lastStatus = { state: "idle", message: "等待输入房间号" };
-let biliDeviceCookiePromise = null;
+let biliAuthState = { loggedIn: false, uid: 0, userName: "" };
 const eventClients = new Set();
-const userNameCache = new Map();
-const MAX_USER_NAME_CACHE = 2048;
 
 function json(response, data, status = 200) {
   response.writeHead(status, {
@@ -148,58 +148,121 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function getBiliDeviceCookie() {
-  if (!biliDeviceCookiePromise) {
-    biliDeviceCookiePromise = fetchJson("https://api.bilibili.com/x/frontend/finger/spi", {
-      timeoutMs: 5000,
-      headers: { Referer: "https://www.bilibili.com/" },
-    }).then((result) => {
-      const buvid3 = result.data?.b_3;
-      const buvid4 = result.data?.b_4;
-      if (result.code !== 0 || !buvid3 || !buvid4) throw new Error(result.message || "无法获取 B 站设备标识");
-      return `buvid3=${buvid3}; buvid4=${buvid4}`;
-    }).catch((error) => {
-      biliDeviceCookiePromise = null;
-      throw error;
-    });
-  }
-  return biliDeviceCookiePromise;
+function publicAuthState() {
+  return { ...biliAuthState };
 }
 
-async function resolveUserName(uid, receivedName) {
-  const numericUid = Number(uid) || 0;
-  const fallback = visibleUserName(receivedName, numericUid);
-  if (!numericUid || !isMaskedUserName(receivedName)) return fallback;
+function updateAuthState(next) {
+  const changed = next.loggedIn !== biliAuthState.loggedIn || next.uid !== biliAuthState.uid || next.userName !== biliAuthState.userName;
+  biliAuthState = next;
+  if (changed) broadcast("auth", publicAuthState());
+}
 
-  const cacheKey = String(numericUid);
-  if (userNameCache.has(cacheKey)) return userNameCache.get(cacheKey);
+async function readStoredBiliAuth() {
+  const cookies = await session.defaultSession.cookies.get({ url: "https://www.bilibili.com/" });
+  const cookieValues = new Map(cookies.map((cookie) => [cookie.name, cookie.value]));
+  const uid = Number(cookieValues.get("DedeUserID") || 0);
+  const loggedIn = Boolean(uid && cookieValues.get("SESSDATA"));
+  return {
+    loggedIn,
+    uid: loggedIn ? uid : 0,
+    cookie: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; "),
+  };
+}
 
-  const lookup = (async () => {
+async function refreshBiliAuthState() {
+  const stored = await readStoredBiliAuth();
+  if (!stored.loggedIn) {
+    updateAuthState({ loggedIn: false, uid: 0, userName: "" });
+    return { ...publicAuthState(), cookie: "", nav: null };
+  }
+
+  let nav = null;
+  let userName = biliAuthState.uid === stored.uid ? biliAuthState.userName : "";
+  try {
+    nav = await fetchJson("https://api.bilibili.com/x/web-interface/nav", {
+      timeoutMs: 5000,
+      headers: { Cookie: stored.cookie, Referer: "https://www.bilibili.com/" },
+    });
+    if (nav.code === 0 && nav.data?.isLogin) userName = String(nav.data.uname || userName);
+    else if (nav.code === 0 && !nav.data?.isLogin) {
+      updateAuthState({ loggedIn: false, uid: 0, userName: "" });
+      return { ...publicAuthState(), cookie: "", nav };
+    } else nav = null;
+  } catch (error) {
+    console.warn("检查 B 站登录状态失败，将继续使用已保存会话", error.message);
+  }
+
+  updateAuthState({ loggedIn: true, uid: stored.uid, userName });
+  return { ...publicAuthState(), cookie: stored.cookie, nav };
+}
+
+function closeLoginWindow() {
+  clearInterval(loginCheckTimer);
+  loginCheckTimer = null;
+  if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
+  loginWindow = null;
+}
+
+function openBiliLoginWindow() {
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.show();
+    loginWindow.focus();
+    return;
+  }
+
+  loginWindow = new BrowserWindow({
+    width: 960,
+    height: 720,
+    minWidth: 760,
+    minHeight: 560,
+    parent: mainWindow || undefined,
+    title: "B站二维码登录",
+    backgroundColor: "#ffffff",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  loginWindow.loadURL("https://passport.bilibili.com/login");
+  loginWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
+  loginCheckTimer = setInterval(async () => {
     try {
-      const cookie = await getBiliDeviceCookie();
-      const result = await fetchJson(`https://api.bilibili.com/x/web-interface/card?mid=${numericUid}`, {
-        timeoutMs: 4000,
-        headers: {
-          Cookie: cookie,
-          Referer: `https://space.bilibili.com/${numericUid}/`,
-        },
-      });
-      if (result.code !== 0) throw new Error(result.message || `用户资料接口返回 ${result.code}`);
-      return visibleUserName(result.data?.card?.name, numericUid);
+      const stored = await readStoredBiliAuth();
+      if (!stored.loggedIn) return;
+      await refreshBiliAuthState();
+      closeLoginWindow();
+      if (settings.roomId) connectRoom();
     } catch (error) {
-      console.warn(`无法还原用户 ${numericUid} 的完整昵称`, error.message);
-      return fallback;
+      console.warn("等待 B 站扫码登录失败", error.message);
     }
-  })();
+  }, 1200);
 
-  userNameCache.set(cacheKey, lookup);
-  if (userNameCache.size > MAX_USER_NAME_CACHE) userNameCache.delete(userNameCache.keys().next().value);
-  return lookup;
+  loginWindow.on("closed", () => {
+    clearInterval(loginCheckTimer);
+    loginCheckTimer = null;
+    loginWindow = null;
+    refreshBiliAuthState().catch(() => undefined);
+  });
+}
+
+async function logoutBili() {
+  closeLoginWindow();
+  const cookies = await session.defaultSession.cookies.get({});
+  const biliCookies = cookies.filter((cookie) => cookie.domain.replace(/^\./, "").endsWith("bilibili.com"));
+  await Promise.all(biliCookies.map((cookie) => {
+    const domain = cookie.domain.replace(/^\./, "");
+    return session.defaultSession.cookies.remove(`https://${domain}${cookie.path || "/"}`, cookie.name);
+  }));
+  updateAuthState({ loggedIn: false, uid: 0, userName: "" });
+  if (settings.roomId) connectRoom();
 }
 
 async function getConnectionInfo(roomInput) {
-  const cookie = await getBiliDeviceCookie().catch(() => "");
-  const cookieHeader = cookie ? { Cookie: cookie } : {};
+  const auth = await refreshBiliAuthState();
+  const cookieHeader = auth.loggedIn && auth.cookie ? { Cookie: auth.cookie } : {};
   const room = await fetchJson(`https://api.live.bilibili.com/room/v1/Room/room_init?id=${roomInput}`, {
     headers: { Referer: `https://live.bilibili.com/${roomInput}`, ...cookieHeader },
   });
@@ -207,7 +270,7 @@ async function getConnectionInfo(roomInput) {
   if (room.data.is_hidden || room.data.is_locked) throw new Error("该直播间当前不可访问");
   const roomId = Number(room.data.room_id);
 
-  const nav = await fetchJson("https://api.bilibili.com/x/web-interface/nav", {
+  const nav = auth.nav || await fetchJson("https://api.bilibili.com/x/web-interface/nav", {
     headers: { Referer: "https://www.bilibili.com/", ...cookieHeader },
   });
   const imgUrl = nav.data?.wbi_img?.img_url;
@@ -224,7 +287,7 @@ async function getConnectionInfo(roomInput) {
   if (danmu.code !== 0 || !danmu.data?.token || !danmu.data?.host_list?.length) {
     throw new Error(danmu.message === "-352" ? "B 站风控拦截，请稍后重试" : danmu.message || "无法获取弹幕线路");
   }
-  return { roomId, token: danmu.data.token, hosts: danmu.data.host_list, cookie };
+  return { roomId, token: danmu.data.token, hosts: danmu.data.host_list, cookie: auth.cookie, uid: auth.uid };
 }
 
 function colorFromNumber(value) {
@@ -232,12 +295,12 @@ function colorFromNumber(value) {
   return Number.isFinite(number) ? `#${number.toString(16).padStart(6, "0").slice(-6)}` : "#ffffff";
 }
 
-async function emitDanmu(data) {
+function emitDanmu(data) {
   const info = data.info;
   if (!Array.isArray(info)) return;
   const uid = Number(info[2]?.[0] || 0);
   const receivedName = Array.isArray(info[2]) ? String(info[2][1] || "") : "";
-  const user = await resolveUserName(uid, receivedName);
+  const user = displayUserName(receivedName, uid, biliAuthState.loggedIn);
   const content = String(info[1] || "").trim();
   if (!content) return;
   broadcast("danmu", {
@@ -250,10 +313,10 @@ async function emitDanmu(data) {
   });
 }
 
-async function emitSuperChat(data) {
+function emitSuperChat(data) {
   const body = data.data || {};
   const uid = Number(body.uid || body.user_info?.uid || 0);
-  const user = await resolveUserName(uid, body.user_info?.uname);
+  const user = displayUserName(body.user_info?.uname, uid, biliAuthState.loggedIn);
   broadcast("superchat", {
     id: `${Date.now()}-${messageSequence += 1}`,
     kind: "superchat",
@@ -264,11 +327,11 @@ async function emitSuperChat(data) {
   });
 }
 
-async function emitGift(data) {
+function emitGift(data) {
   const body = data.data || {};
   const amount = Number(body.num || 1);
   const uid = Number(body.uid || 0);
-  const user = await resolveUserName(uid, body.uname);
+  const user = displayUserName(body.uname, uid, biliAuthState.loggedIn);
   broadcast("gift", {
     id: `${Date.now()}-${messageSequence += 1}`,
     kind: "gift",
@@ -304,11 +367,9 @@ async function handleSocketData(raw, generation) {
     }
     if (packet.meta.op !== WS_OP.MESSAGE || !packet.data) continue;
     const command = String(packet.data.cmd || packet.data.msg?.cmd || "");
-    let emitter = null;
-    if (command.startsWith("DANMU_MSG")) emitter = emitDanmu(packet.data);
-    else if (command === "SUPER_CHAT_MESSAGE" || command === "SUPER_CHAT_MESSAGE_JPN") emitter = emitSuperChat(packet.data);
-    else if (command === "SEND_GIFT") emitter = emitGift(packet.data);
-    emitter?.catch((error) => console.error("处理用户昵称失败", error));
+    if (command.startsWith("DANMU_MSG")) emitDanmu(packet.data);
+    else if (command === "SUPER_CHAT_MESSAGE" || command === "SUPER_CHAT_MESSAGE_JPN") emitSuperChat(packet.data);
+    else if (command === "SEND_GIFT") emitGift(packet.data);
   }
 }
 
@@ -348,7 +409,7 @@ async function connectRoom(isReconnect = false) {
     liveSocket.binaryType = "arraybuffer";
     liveSocket.on("open", () => {
       liveSocket?.send(serialize(WS_OP.USER_AUTHENTICATION, {
-        uid: 0,
+        uid: info.uid || 0,
         roomid: info.roomId,
         protover: 2,
         platform: "web",
@@ -414,6 +475,7 @@ function startServer() {
         });
         response.write(`event: settings\ndata: ${JSON.stringify(settings)}\n\n`);
         response.write(`event: status\ndata: ${JSON.stringify(lastStatus)}\n\n`);
+        response.write(`event: auth\ndata: ${JSON.stringify(publicAuthState())}\n\n`);
         eventClients.add(response);
         const ping = setInterval(() => response.write(": ping\n\n"), 15000);
         request.on("close", () => {
@@ -424,6 +486,15 @@ function startServer() {
       }
       if (url.pathname === "/api/settings" && request.method === "GET") return json(response, settings);
       if (url.pathname === "/api/status" && request.method === "GET") return json(response, lastStatus);
+      if (url.pathname === "/api/auth" && request.method === "GET") return json(response, publicAuthState());
+      if (url.pathname === "/api/auth/login" && request.method === "POST") {
+        openBiliLoginWindow();
+        return json(response, { ok: true });
+      }
+      if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+        await logoutBili();
+        return json(response, { ok: true });
+      }
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         const beforeRoom = settings.roomId;
         settings = sanitizeSettings(await readBody(request));
@@ -519,6 +590,7 @@ if (!hasLock) {
     installMenu();
     await startServer();
     createWindow();
+    await refreshBiliAuthState().catch(() => undefined);
     if (settings.roomId) connectRoom();
   }).catch((error) => {
     console.error("应用启动失败", error);
@@ -529,6 +601,7 @@ if (!hasLock) {
     if (!mainWindow) createWindow();
   });
   app.on("before-quit", () => {
+    closeLoginWindow();
     stopConnection();
     for (const client of eventClients) client.end();
     server?.close();

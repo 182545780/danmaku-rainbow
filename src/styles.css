@@ -115,6 +115,12 @@ body:has(.overlay),
 .primary-button:hover { transform: translateY(-1px); filter: brightness(1.08); }
 .primary-button:disabled { cursor: not-allowed; filter: grayscale(.7); opacity: .45; transform: none; }
 .primary-button i { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border: 2px solid currentColor; border-radius: 50%; vertical-align: -1px; }
+.bili-auth { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #262c3d; }
+.bili-auth strong { display: block; overflow: hidden; color: #d4daeb; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.bili-auth small { display: block; margin-top: 4px; color: #69728b; font-size: 9px; }
+.bili-auth--active strong { color: #52dc9a; }
+.bili-auth button { min-width: 76px; padding: 8px 10px; border: 1px solid #343c54; border-radius: 8px; color: #cbd2e5; background: #151a27; cursor: pointer; font-size: 10px; font-weight: 750; }
+.bili-auth button:hover { border-color: #785bff; background: #211c34; }
 
 .range-control { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; margin-top: 15px; color: #bdc5da; font-size: 11px; }
 .range-control output { color: #8d7cff; font: 700 10px/1 ui-monospace, monospace; }

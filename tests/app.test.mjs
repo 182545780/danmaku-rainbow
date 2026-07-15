@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
-import { isMaskedUserName, visibleUserName } from "../electron/bilibili-user.mjs";
+import { displayUserName, privateUserName, visibleUserName } from "../electron/bilibili-user.mjs";
 
 test("web build contains the control panel bundle", () => {
   assert.equal(existsSync("dist-web/index.html"), true);
@@ -37,14 +37,18 @@ test("overlay keeps complete usernames visible", () => {
   assert.doesNotMatch(nameRule, /ellipsis|nowrap/);
 });
 
-test("masked Bilibili usernames are resolved or replaced with a full UID", () => {
+test("guest names are private and logged-in names are complete without blocking messages", () => {
   const source = readFileSync("electron/main.mjs", "utf8");
 
-  assert.equal(isMaskedUserName("云***"), true);
-  assert.equal(isMaskedUserName("完整用户名"), false);
+  assert.equal(privateUserName("云***"), "云**");
+  assert.equal(privateUserName("完整用户名"), "完**");
+  assert.equal(displayUserName("完整用户名", 123456, false), "完**");
+  assert.equal(displayUserName("完整用户名", 123456, true), "完整用户名");
   assert.equal(visibleUserName("云***", 123456), "用户123456");
   assert.equal(visibleUserName("完整用户名", 123456), "完整用户名");
-  assert.match(source, /x\/frontend\/finger\/spi/);
-  assert.match(source, /x\/web-interface\/card\?mid=/);
-  assert.match(source, /userNameCache/);
+  assert.match(source, /passport\.bilibili\.com\/login/);
+  assert.match(source, /session\.defaultSession\.cookies/);
+  assert.match(source, /pathname === "\/api\/auth\/login"/);
+  assert.match(source, /uid: info\.uid \|\| 0/);
+  assert.doesNotMatch(source, /x\/web-interface\/card\?mid=/);
 });

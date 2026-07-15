@@ -23,6 +23,12 @@ type Status = {
   online?: number;
 };
 
+type AuthState = {
+  loggedIn: boolean;
+  uid: number;
+  userName: string;
+};
+
 type Danmaku = {
   id: string;
   kind: "danmu" | "superchat" | "gift" | "test";
@@ -67,6 +73,7 @@ function formatOnline(value?: number) {
 function useServerEvents(onMessage?: (message: Danmaku) => void) {
   const [status, setStatus] = useState<Status>({ state: "idle", message: "等待连接" });
   const [settings, setSettings] = useState<Settings>(defaults);
+  const [auth, setAuth] = useState<AuthState>({ loggedIn: false, uid: 0, userName: "" });
   const handlerRef = useRef(onMessage);
   handlerRef.current = onMessage;
 
@@ -74,6 +81,10 @@ function useServerEvents(onMessage?: (message: Danmaku) => void) {
     fetch("/api/settings")
       .then((response) => response.json())
       .then((data) => setSettings({ ...defaults, ...data }))
+      .catch(() => undefined);
+    fetch("/api/auth")
+      .then((response) => response.json())
+      .then(setAuth)
       .catch(() => undefined);
 
     const events = new EventSource("/events");
@@ -83,6 +94,9 @@ function useServerEvents(onMessage?: (message: Danmaku) => void) {
     events.addEventListener("status", (event) => {
       setStatus(JSON.parse((event as MessageEvent).data));
     });
+    events.addEventListener("auth", (event) => {
+      setAuth(JSON.parse((event as MessageEvent).data));
+    });
     for (const type of ["danmu", "superchat", "gift", "test"]) {
       events.addEventListener(type, (event) => {
         handlerRef.current?.(JSON.parse((event as MessageEvent).data));
@@ -91,7 +105,7 @@ function useServerEvents(onMessage?: (message: Danmaku) => void) {
     return () => events.close();
   }, []);
 
-  return { status, settings, setSettings };
+  return { status, settings, setSettings, auth };
 }
 
 function Overlay() {
@@ -180,7 +194,7 @@ function Toggle({ checked, label, note, onChange }: { checked: boolean; label: s
 function ControlPanel() {
   const [received, setReceived] = useState(0);
   const [copied, setCopied] = useState(false);
-  const { status, settings, setSettings } = useServerEvents(() => setReceived((value) => value + 1));
+  const { status, settings, setSettings, auth } = useServerEvents(() => setReceived((value) => value + 1));
   const saveTimer = useRef<number | undefined>(undefined);
 
   const update = useCallback((patch: Partial<Settings>) => {
@@ -267,6 +281,15 @@ function ControlPanel() {
             <button className="primary-button" onClick={() => fetch("/api/reconnect", { method: "POST" })} disabled={!settings.roomId}>
               <i />{connected ? "重新连接" : "连接弹幕"}
             </button>
+            <div className={`bili-auth bili-auth--${auth.loggedIn ? "active" : "guest"}`}>
+              <div>
+                <strong>{auth.loggedIn ? (auth.userName || `UID ${auth.uid}`) : "游客模式"}</strong>
+                <small>{auth.loggedIn ? "显示完整用户名 · 登录状态自动保存" : "昵称显示为首字 + **"}</small>
+              </div>
+              <button onClick={() => fetch(auth.loggedIn ? "/api/auth/logout" : "/api/auth/login", { method: "POST" })}>
+                {auth.loggedIn ? "退出登录" : "二维码登录"}
+              </button>
+            </div>
           </section>
 
           <section className="panel">
@@ -291,7 +314,7 @@ function ControlPanel() {
 
           <section className="panel compact-panel">
             <div className="panel-title"><span>04</span><div><h2>显示内容</h2><p>控制 OBS 画面元素</p></div></div>
-            <Toggle checked={settings.showNames} label="观众昵称" note="完整显示用户名" onChange={(showNames) => update({ showNames })} />
+            <Toggle checked={settings.showNames} label="观众昵称" note={auth.loggedIn ? "已登录：完整用户名" : "游客：首字 + **"} onChange={(showNames) => update({ showNames })} />
             <Toggle checked={settings.showShadow} label="文字阴影" note="复杂画面更清晰" onChange={(showShadow) => update({ showShadow })} />
             <Toggle checked={settings.showGifts} label="礼物与醒目留言" note="包含 SC 与礼物提示" onChange={(showGifts) => update({ showGifts })} />
           </section>
